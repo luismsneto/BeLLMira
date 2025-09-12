@@ -1,0 +1,202 @@
+import requests
+import json
+import shlex
+
+class ModelClient:
+    def __init__(self, base_url="http://localhost:8080/"):
+        self.base_url = base_url
+        self.session = requests.Session()
+
+    def get_model_name(self) -> str:
+        url = self.base_url + "v1/models"
+        response = requests.get(url)
+        response.raise_for_status()  # Raise HTTPError if not 2xx
+
+        try:
+            return response.json()["data"][0]["id"]
+        except (KeyError, IndexError, ValueError) as e:
+            raise Exception(f"Could not parse model name: {e}")
+
+    @staticmethod
+    def is_valid_json(data):
+        try:
+            json.dumps(data)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def build_chat_request(
+        self,
+        user_prompt,
+        system_prompt=None,
+        model_name="/app/model/model",
+        temperature=0,
+        max_tokens=1000,
+        json_schema=None,
+        assistant_messages=None,
+        image_prompt=None,
+        enable_thinking: bool = None,
+    ):
+        url = self.base_url + "v1/chat/completions"
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        if assistant_messages:
+            messages.extend(assistant_messages)
+
+        if image_prompt:
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_prompt}"
+                        }
+                    }
+                ]
+            })
+        else:
+            messages.append({"role": "user", "content": user_prompt})
+
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": temperature
+        }
+        if json_schema is not None:
+            data["guided_json"] = json_schema
+        if max_tokens is not None:
+            data["max_tokens"] = max_tokens
+        if enable_thinking is not None: 
+            data["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+        if not self.is_valid_json(data):
+            raise Exception("Invalid request data for chat")
+        return requests.Request("POST", url, headers=headers, json=data)
+
+    def build_embedding_request(
+        self,
+        input_text,
+        model_name="/app/model/embedding",
+        user_id=None
+    ):
+        url = self.base_url + "v1/embeddings"
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            "model": model_name,
+            "input": input_text
+        }
+        if user_id:
+            data["user"] = user_id
+
+        if not self.is_valid_json(data):
+            raise Exception("Invalid request data for embeddings")
+
+        return requests.Request("POST", url, headers=headers, json=data)
+
+    def build_rerank_request(
+        self,
+        query,
+        documents,
+        modelname="/app/model/rerank",
+        top_n=None
+    ):
+        url = self.base_url + "v1/rerank"
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            "model": modelname,
+            "query": query,
+            "documents": documents
+        }
+        if top_n is not None:
+            data["top_n"] = top_n
+
+        if not self.is_valid_json(data):
+            raise Exception("Invalid request data for reranking")
+
+        return requests.Request("POST", url, headers=headers, json=data)
+
+    def send_request(self, request):
+        prepared = self.session.prepare_request(request)
+        return self.session.send(prepared)
+
+    def print_curl(self, request):
+        prepared = self.session.prepare_request(request)
+        parts = ["curl", "-X", prepared.method]
+
+        for k, v in prepared.headers.items():
+            if k.lower() == "content-length":
+                continue  # Skip Content-Lengt
+            parts += ["-H", f"{shlex.quote(f'{k}: {v}')}"]
+
+        if prepared.body:
+            body = prepared.body
+            if isinstance(body, bytes):
+                body = body.decode('latin-1')
+            parts += ["--data", shlex.quote(body)]
+
+        parts += [shlex.quote(prepared.url)]
+
+        return " ".join(parts)
+
+    def print_json(self, request):
+        prepared = self.session.prepare_request(request)
+        body = prepared.body
+        if isinstance(body, bytes):
+            body = body.decode('utf-8')
+        try:
+            parsed = json.loads(body)
+            return json.dumps(parsed, indent=2, ensure_ascii=False)
+        except Exception:
+            return body or "{}"
+
+    def print_invoke_webrequest(self, request):
+        prepared = self.session.prepare_request(request)
+
+        parts = ["$body = ("]
+
+        body = prepared.body
+        if isinstance(body, bytes):
+            body = body.decode('latin-1')
+
+        parsed = json.loads(body)
+
+        def to_ps(obj):
+            if isinstance(obj, dict):
+                return "@{ " + "; ".join(f"{k} = {to_ps(v)}" for k, v in obj.items()) + " }"
+            elif isinstance(obj, list):
+                return "@(" + ", ".join(to_ps(i) for i in obj) + ")"
+            elif isinstance(obj, str):
+                return '"' + obj.replace('"', '`"') + '"'
+            else:
+                return json.dumps(obj)
+        ps_hashtable = to_ps(parsed)
+        parts.append(ps_hashtable + ") | ConvertTo-Json -Depth 10 -Compress")
+
+        # Now the command
+        cmd = [
+            "Invoke-WebRequest",
+            "-Uri", f'"{prepared.url}"',
+            "-Method", prepared.method,
+        ]
+
+        headers = {
+            k: v for k, v in prepared.headers.items()
+            if k.lower() not in ["content-length", "connection"]
+        }
+        if headers:
+            hdrs = "; ".join(f'"{k}" = "{v}"' for k, v in headers.items())
+            cmd += ["-Headers", f"@{{ {hdrs} }}"]
+
+        cmd += ["-Body", "([System.Text.Encoding]::UTF8.GetBytes($body))"]
+
+        return "\n".join(parts + [""] + [" ".join(cmd)])
+
+    def print_request_cmds(self, request):
+        print("# curl")
+        print(self.print_curl(request))
+        print()
+        print("# Invoke-WebRequest (PowerShell)")
+        print(self.print_invoke_webrequest(request))
