@@ -71,6 +71,7 @@ class ModelClient:
         if max_tokens is not None:
             data["max_tokens"] = max_tokens
         if enable_thinking is not None: 
+            #data["enable_thinking"] = enable_thinking
             data["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
         if not self.is_valid_json(data):
             raise Exception("Invalid request data for chat")
@@ -121,6 +122,39 @@ class ModelClient:
     def send_request(self, request):
         prepared = self.session.prepare_request(request)
         return self.session.send(prepared)
+
+    def stream_chat_response(self, req: requests.Request):
+        """
+        Faz streaming de uma resposta de chat a partir de um requests.Request.
+
+        Args:
+            prepared_request: requests.Request já criado, vindo de build_chat_request.
+
+        Yields:
+            str: chunks de texto gerados pelo modelo.
+        """
+        req.json["stream"] = True
+        prepped = self.session.prepare_request(req)
+
+        with self.session.send(prepped, stream=True) as response:
+            response.raise_for_status() 
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                decoded = line.decode("utf-8").strip()
+                if decoded.startswith("data: "):
+                    decoded = decoded[len("data: "):]
+                if decoded == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(decoded)
+                except json.JSONDecodeError:
+                    continue
+                delta = chunk["choices"][0]["delta"]
+                text = delta.get("content")
+                if text:
+                    yield text
 
     def print_curl(self, request):
         prepared = self.session.prepare_request(request)
