@@ -3,3 +3,7 @@ from .model_classification_evaluator import ModelClassificationEvaluator
 from .model_concurrent_load_evaluator import ModelParallelLoadEvaluator
 from .model_context_length_evaluator import ModelContextLengthEvaluator
 from .model_vision_evaluator import ModelVisionEvaluator
+from .model_ttft_evaluator import ModelTTFTEvaluator
+from .model_embedding_quality_evaluator import ModelEmbeddingQualityEvaluator
+from .model_summarization_evaluator import ModelSummarizationEvaluator
+from .model_regression_evaluator import ModelRegressionEvaluator

@@ -3,7 +3,7 @@ import time
 import traceback
 import pandas as pd
 import requests
-from bellmira.evaluators import ModelClassificationEvaluator, ModelParallelLoadEvaluator, ModelContextLengthEvaluator, ModelVisionEvaluator
+from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
 from bellmira.utils.dict_logger import ExperimentLogger
 from bellmira.llm_model.llm_model import LLMModel
 
@@ -90,43 +90,28 @@ def wait_for_model_and_evaluate(
           log["Status"] = state
           logger.log(log)
           return
-        if evaluator_class==ModelContextLengthEvaluator:  
-            print(f"Experiment for {model}: Using Model Context Length Evaluator.")
-            evaluator_args["url"]= f"{url}"
-            evaluator = evaluator_class(**evaluator_args)
-            results = evaluator.evaluate()
-            data = evaluator.extract_threshold_metrics(results)
-            print(f"Experiment for {model}: Data: {data}")
-            log["Status"] = "success"
-        elif evaluator_class==ModelParallelLoadEvaluator:  
-            print(f"Experiment for {model}: Using Model Parallel Load Evaluator.")
-            evaluator_args["url"]= f"{url}"
-            evaluator = evaluator_class(**evaluator_args)
-            results = evaluator.evaluate()
-            data = evaluator.extract_threshold_metrics(results)
-            print(f"Experiment for {model}: Data: {data}")
-            log["Status"] = "success"
-        elif evaluator_class==ModelVisionEvaluator:  
-            print(f"Experiment for {model}: Using Model Vision Evaluator.")
-            evaluator_args["url"]= f"{url}"
-            evaluator = evaluator_class(**evaluator_args)
-            results = evaluator.evaluate()
-            data = evaluator.extract_threshold_metrics(results)
-            print(f"Experiment for {model}: Data: {data}")
-            log["Status"] = "success"
-        elif evaluator_class==ModelClassificationEvaluator:  
-            print(f"Experiment for {model}: Using Model Classification Evaluator.")
-            evaluator_args["url"]= f"{url}"
-            max_prompts = evaluator_args.pop("max_prompts", 500)
-            evaluator = evaluator_class(**evaluator_args)
-            print(f"Max Prompts: ", max_prompts)
-            results = evaluator.evaluate(max_prompts=max_prompts)
-            data = evaluator.extract_threshold_metrics(results)
-            print(f"Experiment for {model}: Data: {data}")
-            log["Status"] = "success"
-            
-        else:
-            raise Exception("Invalid evaluator")
+        if evaluator_class is None:
+            raise ValueError(f"Experiment for {model}: no evaluator class provided.")
+        if not issubclass(evaluator_class, ModelEvaluatorInterface):
+            raise TypeError(
+                f"Experiment for {model}: evaluator_class must be a subclass of "
+                f"ModelEvaluatorInterface, got {evaluator_class}."
+            )
+        print(f"Experiment for {model}: Using {evaluator_class.__name__}.")
+        # Copy args to avoid mutating the caller's dict across parallel threads
+        args = dict(evaluator_args)
+        args["url"] = url
+        # max_prompts is an evaluate() argument, not a constructor argument
+        max_prompts = args.pop("max_prompts", None)
+        evaluator = evaluator_class(**args)
+        results = (
+            evaluator.evaluate(max_prompts=max_prompts)
+            if max_prompts is not None
+            else evaluator.evaluate()
+        )
+        data = evaluator.extract_threshold_metrics(results)
+        print(f"Experiment for {model}: Data: {data}")
+        log["Status"] = "success"
         log.update(data)
         logger.log(log)
         print(f"Experiment for {model}: Evaluation complete.")

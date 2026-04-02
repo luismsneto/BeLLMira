@@ -1,0 +1,8 @@
+Model,Max Model Len,Quantization,Precision,Dtype,Size,Prefix Caching,Env,VLLM Version,Status,Datetime,1k Tok Avg Time,Error
+Qwen3-14 IN,,,,,,False,IN,0.9.2,error-exception,2026-03-28 20:50:33,,
+Qwen2.5 VL IN,,,,,,False,IN,0.9.2,timeout,2026-03-28 20:58:23,,
+Model,Max Model Len,Quantization,Precision,Dtype,Size,Prefix Caching,Env,VLLM Version,Status,Datetime,1k Tok Avg Time,Error
+Qwen3-14 IN,,,,,,False,IN,0.9.2,success,2026-03-28 21:11:08,"{'Avg_Exec_Time': 85, 'Avg_prompt_tokens': 1322, 'Avg_completion_tokens': 830}",
+Qwen2.5 VL IN,,,,,,False,IN,0.9.2,timeout,2026-03-28 21:17:33,,
+Qwen3-14 IN,,,,,,False,IN,0.9.2,success,2026-03-28 21:28:18,"{'Avg_Exec_Time': 86, 'Avg_prompt_tokens': 1322, 'Avg_completion_tokens': 830}",
+Qwen2.5 VL IN,,,,,,False,IN,0.9.2,timeout,2026-03-28 21:34:43,,

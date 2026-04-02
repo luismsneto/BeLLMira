@@ -22,19 +22,25 @@ class ModelClassificationEvaluator():
     ):
         prefix, path = data_path.split(":", 1)
         path = path.lstrip("/").strip()
+        self._use_spark = False
+
         match prefix:
             case "s3":
-                # Handle S3 path
-                return "Handling S3 path. Not implemented"
+                raise NotImplementedError("S3 path handling is not yet implemented")
             case "dbfs":
-                # Handle DBFS path
                 print("Handling DBFS path")
+                self._use_spark = True
             case "file":
-                # Handle local file path
                 print("Handling local file path")
             case "adls":
-                # Handle Azure Data Lake Storage path
                 print("Handling ADLS path")
+                dbutils = globals().get('dbutils')
+                spark = globals().get('spark')
+                if dbutils is None or spark is None:
+                    raise RuntimeError(
+                        "'dbutils' and 'spark' globals are required for ADLS paths. "
+                        "This feature is only supported in a Databricks environment."
+                    )
                 try:
                     client_id = dbutils.secrets.get(scope="DataBricksKVScopeAIP", key="DTBK002-SPNClientID-AI")
                     client_secret = dbutils.secrets.get(scope="DataBricksKVScopeAIP", key="DTBK002-SPNClientSecret-AI")
@@ -51,30 +57,41 @@ class ModelClassificationEvaluator():
                 except Exception as e:
                     print(f"Error configuring ADLS access: {e}")
                     print("Please ensure Databricks secrets scope 'DataBricksKVScopeAIP' and the required keys exist.")
+                    raise
                 data_path = datalake_url + path
+                self._use_spark = True
             case _:
-                # Handle unknown prefix
-                return "Unknown prefix"
-        try:
-            data_df = spark.read.format(data_format).load(data_path)
-            data_df.createOrReplaceTempView("categories_raw")
-        except Exception as e:
-            print(f"Error loading data from {data_path}: {e}")
-            raise e
-        
-        #self.bible_path = bible_path
-        #self.prompts = prompts
-        #self.chapter_numbers = chapter_numbers
+                raise ValueError(f"Unknown data path prefix: '{prefix}'")
+
+        if self._use_spark:
+            spark = globals().get('spark')
+            if spark is None:
+                raise RuntimeError(
+                    "'spark' global is required for this data path prefix. "
+                    "This feature is only supported in a Databricks environment."
+                )
+            try:
+                data_df = spark.read.format(data_format).load(data_path)
+                data_df.createOrReplaceTempView("categories_raw")
+            except Exception as e:
+                print(f"Error loading data from {data_path}: {e}")
+                raise
+            self.data = data_df
+        else:
+            read_fns = {"parquet": pd.read_parquet, "csv": pd.read_csv, "json": pd.read_json}
+            if data_format not in read_fns:
+                raise ValueError(f"Unsupported data format for local files: '{data_format}'")
+            self.data = read_fns[data_format](path)
+
         self.model_url = url
         self.system_prompt = system_prompt
         self.temperature = temperature
         self.json_schema = json_schema
         self.model_client = ModelClient(base_url=self.model_url)
-        self.model_name = self.model_client.get_model_name( )
+        self.model_name = self.model_client.get_model_name()
 
         self.input_col = input_col
         self.output_col = output_col
-        self.data = data_df
 
     def warm_up_model(self, warmup_count: int = 10, warmup_prompt: str = "Hello! Please respond quickly."):
         """
@@ -103,7 +120,7 @@ class ModelClassificationEvaluator():
         print("ClassificationEvaluator warm up model finished.")
         results_dict = {}
 
-        batch=self.data.limit(max_prompts).toPandas()
+        batch = self.data.limit(max_prompts).toPandas() if self._use_spark else self.data.head(max_prompts)
         texts = []
 
         if self.input_col not in batch or self.output_col not in batch:

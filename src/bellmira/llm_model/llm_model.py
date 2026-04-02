@@ -260,23 +260,23 @@ class LLMModel():
       
     
     print(f"Model Server: Running command: {' '.join(base_cmd)}")
-    if stop_event is None:
+    if stop_event is None and server_finished_event is None:
       print(f"Model Server: Running on current thread (blocking execution)")
       subprocess.run(base_cmd, check=True)
     else:
       print(f"Model Server: Running on parallel thread")
       process = subprocess.Popen(base_cmd)
 
-    if server_finished_event:
-      def monitor_process():
-          process.wait()
-          print("Model Server: process exited.")
-          if server_finished_event:
-              print("Model Server: Set server_finished_event.")
-              server_finished_event.set()
+      if server_finished_event:
+        def monitor_process():
+            process.wait()
+            print("Model Server: process exited.")
+            print("Model Server: Set server_finished_event.")
+            server_finished_event.set()
 
-      threading.Thread(target=monitor_process, daemon=True).start()
-    if stop_event:
+        threading.Thread(target=monitor_process, daemon=True).start()
+
+      if stop_event:
         # Wait until stop_event is set, then terminate process
         stop_event.wait()
         print("Model Server: Stop event set, terminating server...")
