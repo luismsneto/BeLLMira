@@ -1,28 +1,29 @@
-import os
 import base64
+import logging
+import os
 import requests
 import uuid
-from typing import List
+from typing import List, Optional, Dict, Tuple, Literal
 from PIL import Image
 from io import BytesIO
-from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
-from bellmira.llm_model.llm_model_client import ModelClient
 from huggingface_hub import login
 import json
 import time
-from typing import List, Optional, Dict, Tuple, Literal
-  
-def is_valid_image_prompt_list(image_prompt_list) -> bool:
-    if not isinstance(image_prompt_list, list):
-        return False
 
-    for item in image_prompt_list:
-        if not isinstance(item, tuple) or len(item) != 2:
-            return False
-        prompt, url = item
-        if not isinstance(prompt, str) or not isinstance(url, str):
-            return False
-    return True
+from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
+from bellmira.llm_model.llm_model_client import ModelClient
+
+logger = logging.getLogger(__name__)
+
+
+def _format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    elif size < 1024 ** 2:
+        return f"{size / 1024:.1f} KB"
+    else:
+        return f"{size / (1024 ** 2):.2f} MB"
+
 
 def download_images_from_huggingface(
     image_urls: list,
@@ -50,10 +51,10 @@ def download_images_from_huggingface(
             image.save(save_path, format="PNG")
             saved_files.append(save_path)
 
-            print(f"[{url}] ✅ Saved: {save_path}")
+            logger.debug("[%s] Saved: %s", url, save_path)
 
         except Exception as e:
-            print(f"[{url}] ❌ Failed to process {url}: {e}")
+            logger.warning("[%s] Failed to process image: %s", url, e)
 
     return saved_files
 
@@ -67,7 +68,18 @@ class ModelVisionEvaluator(ModelEvaluatorInterface):
                  json_schema: Optional[dict] = None,
     ):
         """
-        Logs in to Hugging Face, downloads 12 images, saves them locally.
+        Initialises the vision evaluator.
+
+        Loads images from *image_folder_path* (PNG/JPG/JPEG files sorted by file
+        size ascending) and connects to the model server at *url*.
+
+        Args:
+            url:               Model server base URL.
+            image_folder_path: Local folder containing PNG/JPG/JPEG images.
+            prompts:           Text prompts sent alongside each image.
+            temperature:       Sampling temperature.
+            system_prompt:     Optional system prompt forwarded to the model.
+            json_schema:       Optional guided-JSON schema.
         """
         self.model_url = url
         self.prompts = prompts
@@ -86,14 +98,6 @@ class ModelVisionEvaluator(ModelEvaluatorInterface):
         { "Size:{size}_Dim:{width}×{height}": image_path }
         """
         
-        def format_bytes(size: int) -> str:
-            if size < 1024:
-                return f"{size} B"
-            elif size < 1024 ** 2:
-                return f"{size / 1024:.1f} KB"
-            else:
-                return f"{size / (1024 ** 2):.2f} MB"
-
         image_info = []
         for filename in sorted(os.listdir(self.context_path)):
             if filename.lower().endswith((".png", ".jpg", ".jpeg")):
@@ -102,10 +106,10 @@ class ModelVisionEvaluator(ModelEvaluatorInterface):
                     with Image.open(path) as img:
                         width, height = img.size
                     size_bytes = os.path.getsize(path)
-                    size_human = format_bytes(size_bytes)
+                    size_human = _format_bytes(size_bytes)
                     image_info.append((size_bytes, size_human, width, height, path) )
                 except Exception as e:
-                    print(f"❌ Failed to load {path}: {e}")
+                    logger.warning("Failed to load %s: %s", path, e)
         image_info.sort(key=lambda x: x[0])
         sorted_images = {
             f"Size:{size_human}_Dim:{width}×{height}": path
@@ -126,9 +130,10 @@ class ModelVisionEvaluator(ModelEvaluatorInterface):
                 start_time = time.time()
                 req = self.model_client.build_chat_request(
                     prompt,
-                    system_prompt="Analyse the next image and tell what it is about.",
+                    system_prompt=self.system_prompt,
                     model_name=self.model_name,
-                    temperature=0,
+                    temperature=self.temperature,
+                    json_schema=self.json_schema,
                     image_prompt=image_data
                 )
                 result = self.model_client.send_request(req)
@@ -158,68 +163,35 @@ class ModelVisionEvaluator(ModelEvaluatorInterface):
                 results_dict[image_key].append(request_stats)
         return results_dict
     
-    def warm_up_model(self, warmup_count: int = 10, warmup_prompt: str = "Hello! Please respond quickly."):
-        """
-        Send a few dummy requests to warm up the model.
-        """
-        print(f"Warming up the model with {warmup_count} requests...")
-        for i in range(warmup_count):
-            try:
-                req = self.model_client.build_chat_request(
-                    warmup_prompt,
-                    system_prompt=None,
-                    model_name=self.model_name,
-                    temperature=0
-                )
-                response = self.model_client.send_request(req)
-                if response.ok:
-                    print(f"Warmup request {i+1} succeeded.")
-                else:
-                    print(f"Warmup request {i+1} failed with code {response.status_code}.")
-            except Exception as e:
-                print(f"Warmup request {i+1} raised an error: {e}")
-
-    def compute_averages(self, results_dict: Dict[str, List[Dict]]) -> Dict[str, Dict]:
-        avg_results = {}
-
-        for key, results in results_dict.items():
-            total_exec = 0.0
-            total_tokens = 0
-            prompt_tokens = 0
-            comp_tokens = 0
-            exec_count = 0
-            token_count = 0
-            errors = []
-            for result in results:
-                code = result.get("Code")
-                if code != 200:
-                    errors.append(f"{code} {result.get('Message')}")
-                exec_time = result.get("Execution_time")
-                if exec_time is not None:
-                    total_exec += exec_time
-                    exec_count += 1
-                total_t = result.get("Total_tokens")
-                if total_t is not None:
-                    total_tokens += total_t
-                    prompt_tokens += result.get("Prompt_tokens", 0)
-                    comp_tokens += result.get("Completion_tokens", 0)
-                    token_count += 1
-            avg_result = {}
-            if exec_count:
-                avg_result["Avg_execution_time"] = round(total_exec / exec_count, 2)
-            else:
-                avg_result["Avg_execution_time"] = None
-            if token_count:
-                avg_result["Avg_total_tokens"] = round(total_tokens / token_count, 2)
-                avg_result["Avg_prompt_tokens"] = round(prompt_tokens / token_count, 2)
-                avg_result["Avg_completion_tokens"] = round(comp_tokens / token_count, 2)
-            if errors:
-                avg_result["Errors"] = errors
-            avg_results[key] = avg_result
-        return avg_results
+    def warm_up_model(self, warmup_count: int = 10, warmup_prompt: str = "Describe this image.") -> None:
+        """Override: warms the vision pathway by sending requests that include an image."""
+        try:
+            buf = BytesIO()
+            Image.new("RGB", (1, 1), color=(255, 255, 255)).save(buf, format="PNG")
+            synthetic_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            logger.debug("Warming up vision model with %d image requests...", warmup_count)
+            for i in range(warmup_count):
+                try:
+                    req = self.model_client.build_chat_request(
+                        warmup_prompt,
+                        system_prompt=None,
+                        model_name=self.model_name,
+                        temperature=0,
+                        image_prompt=synthetic_b64,
+                    )
+                    response = self.model_client.send_request(req)
+                    if response.ok:
+                        logger.debug("Vision warmup request %d succeeded.", i + 1)
+                    else:
+                        logger.warning("Vision warmup request %d failed with code %s.", i + 1, response.status_code)
+                except Exception as e:
+                    logger.warning("Vision warmup request %d raised an error: %s", i + 1, e)
+        except Exception as e:
+            logger.warning("Could not build synthetic image for warmup (%s); falling back to text-only warmup.", e)
+            super().warm_up_model(warmup_count=warmup_count, warmup_prompt=warmup_prompt)
 
     def extract_threshold_metrics(self,
-                                avg_results: Dict[str, Dict], 
+                                avg_results: Dict[str, Dict],
                                 metrics: List[str] = ["Avg_execution_time"],
                                 key_mode: Literal["full", "size", "dim"] = "dim",
                                 suffix_map: Dict[str, str] = {"Avg_execution_time": "Avg_Exec_T(s)"}) -> dict:
@@ -261,12 +233,8 @@ class ModelVisionEvaluator(ModelEvaluatorInterface):
                     result[f"{base_key}_{short_metric}"] = value
 
             if "Errors" in key_metrics:
-                for err in key_metrics["Errors"]:
-                    errors.append(f"{base_key}_Error:{err}")
+                errors.append(f"{base_key}_Error:{key_metrics['Errors']}")
         if errors:
             result["Error"] = ";".join(errors)
 
         return result
-        #def extract_threshold_metrics(self, data: dict) -> dict:
-            
-        #    return row

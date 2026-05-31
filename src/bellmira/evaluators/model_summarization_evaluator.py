@@ -1,63 +1,13 @@
+import logging
 import time
-from collections import Counter
 from typing import List, Dict, Optional, Tuple
 
 from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
 from bellmira.llm_model.llm_model_client import ModelClient
+from bellmira.utils.text_metrics import rouge_n, rouge_l, compression_ratio
+from bellmira.utils.metrics_utils import mean_of_key
 
-
-# ---------------------------------------------------------------------------
-# ROUGE implementation (no external dependencies)
-# ---------------------------------------------------------------------------
-
-def _ngrams(tokens: List[str], n: int) -> List[tuple]:
-    return [tuple(tokens[i: i + n]) for i in range(len(tokens) - n + 1)]
-
-
-def rouge_n(hypothesis: str, reference: str, n: int) -> Dict[str, float]:
-    hyp_tokens = hypothesis.lower().split()
-    ref_tokens = reference.lower().split()
-    hyp_counts = Counter(_ngrams(hyp_tokens, n))
-    ref_counts = Counter(_ngrams(ref_tokens, n))
-    overlap = sum((hyp_counts & ref_counts).values())
-    precision = overlap / sum(hyp_counts.values()) if hyp_counts else 0.0
-    recall = overlap / sum(ref_counts.values()) if ref_counts else 0.0
-    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
-    return {"precision": round(precision, 4), "recall": round(recall, 4), "f1": round(f1, 4)}
-
-
-def _lcs_length(x: List[str], y: List[str]) -> int:
-    """Space-efficient LCS using two rows of DP."""
-    m, n = len(x), len(y)
-    dp = [[0] * (n + 1) for _ in range(2)]
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            if x[i - 1] == y[j - 1]:
-                dp[i % 2][j] = dp[(i - 1) % 2][j - 1] + 1
-            else:
-                dp[i % 2][j] = max(dp[(i - 1) % 2][j], dp[i % 2][j - 1])
-    return dp[m % 2][n]
-
-
-def rouge_l(hypothesis: str, reference: str) -> Dict[str, float]:
-    hyp_tokens = hypothesis.lower().split()
-    ref_tokens = reference.lower().split()
-    lcs = _lcs_length(hyp_tokens, ref_tokens)
-    precision = lcs / len(hyp_tokens) if hyp_tokens else 0.0
-    recall = lcs / len(ref_tokens) if ref_tokens else 0.0
-    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
-    return {"precision": round(precision, 4), "recall": round(recall, 4), "f1": round(f1, 4)}
-
-
-def compression_ratio(document: str, summary: str) -> float:
-    doc_words = len(document.split())
-    sum_words = len(summary.split())
-    return round(sum_words / doc_words, 4) if doc_words > 0 else 0.0
-
-
-# ---------------------------------------------------------------------------
-# Evaluator
-# ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
 
 class ModelSummarizationEvaluator(ModelEvaluatorInterface):
     """
@@ -133,7 +83,7 @@ class ModelSummarizationEvaluator(ModelEvaluatorInterface):
             usage = body.get("usage", {})
             return summary, latency, usage.get("prompt_tokens"), usage.get("completion_tokens")
         except (KeyError, IndexError, ValueError) as e:
-            print(f"Failed to parse summarization response: {e}")
+            logger.warning("Failed to parse summarization response: %s", e)
             return None, latency, None, None
 
     def evaluate(self, max_prompts: int = None) -> List[Dict]:
@@ -142,14 +92,14 @@ class ModelSummarizationEvaluator(ModelEvaluatorInterface):
         max_prompts limits the number of pairs evaluated (None = all).
         Returns a list of per-pair result dicts.
         """
-        print("ModelSummarizationEvaluator: warming up model...")
+        logger.info("ModelSummarizationEvaluator: warming up model...")
         self.warm_up_model()
-        print("ModelSummarizationEvaluator: warm-up finished.")
+        logger.info("ModelSummarizationEvaluator: warm-up finished.")
         results = []
         pairs = self.pairs if max_prompts is None else self.pairs[:max_prompts]
 
         for i, (document, reference) in enumerate(pairs):
-            print(f"  Pair {i + 1}/{len(pairs)}: doc='{document[:60]}...'")
+            logger.info("Pair %d/%d: doc='%s...'", i + 1, len(pairs), document[:60])
             summary, latency, prompt_tokens, completion_tokens = self._summarize(document)
 
             if summary is None:
@@ -185,15 +135,15 @@ class ModelSummarizationEvaluator(ModelEvaluatorInterface):
                 "Generated_summary": summary,
                 "Reference_summary": reference,
             }
-            print(
-                f"    R1={r1['f1']:.4f}  R2={r2['f1']:.4f}  RL={rl['f1']:.4f}  "
-                f"compression={comp:.3f}  latency={latency:.2f}s"
+            logger.debug(
+                "R1=%.4f  R2=%.4f  RL=%.4f  compression=%.3f  latency=%.2fs",
+                r1["f1"], r2["f1"], rl["f1"], comp, latency,
             )
             results.append(result)
         return results
 
     def warm_up_model(self, warmup_count: int = 3, warmup_prompt: str = "Summarize: The sky is blue."):
-        print(f"Warming up with {warmup_count} requests...")
+        logger.debug("Warming up with %d requests...", warmup_count)
         for i in range(warmup_count):
             try:
                 req = self.model_client.build_chat_request(
@@ -205,11 +155,11 @@ class ModelSummarizationEvaluator(ModelEvaluatorInterface):
                 )
                 response = self.model_client.send_request(req)
                 if response.ok:
-                    print(f"  Warmup {i + 1} succeeded.")
+                    logger.debug("Warmup %d succeeded.", i + 1)
                 else:
-                    print(f"  Warmup {i + 1} failed: {response.status_code}")
+                    logger.warning("Warmup %d failed: %s", i + 1, response.status_code)
             except Exception as e:
-                print(f"  Warmup {i + 1} raised: {e}")
+                logger.warning("Warmup %d raised: %s", i + 1, e)
 
     def extract_threshold_metrics(self, results: List[Dict]) -> Dict:
         """
@@ -219,24 +169,18 @@ class ModelSummarizationEvaluator(ModelEvaluatorInterface):
         if not valid:
             return {"Error": "No valid results to aggregate"}
 
-        n = len(valid)
-
-        def mean(key):
-            vals = [r[key] for r in valid if r.get(key) is not None]
-            return round(sum(vals) / len(vals), 4) if vals else None
-
         errors = [r.get("Error") for r in results if r.get("Error")]
 
         return {
-            "Pairs_evaluated": n,
-            "Avg_ROUGE1_F1": mean("ROUGE1_F1"),
-            "Avg_ROUGE2_F1": mean("ROUGE2_F1"),
-            "Avg_ROUGEL_F1": mean("ROUGEL_F1"),
-            "Avg_ROUGE1_precision": mean("ROUGE1_precision"),
-            "Avg_ROUGE1_recall": mean("ROUGE1_recall"),
-            "Avg_compression_ratio": mean("Compression_ratio"),
-            "Avg_latency": mean("Latency"),
-            "Avg_prompt_tokens": mean("Prompt_tokens"),
-            "Avg_completion_tokens": mean("Completion_tokens"),
+            "Pairs_evaluated": len(valid),
+            "Avg_ROUGE1_F1": mean_of_key(valid, "ROUGE1_F1"),
+            "Avg_ROUGE2_F1": mean_of_key(valid, "ROUGE2_F1"),
+            "Avg_ROUGEL_F1": mean_of_key(valid, "ROUGEL_F1"),
+            "Avg_ROUGE1_precision": mean_of_key(valid, "ROUGE1_precision"),
+            "Avg_ROUGE1_recall": mean_of_key(valid, "ROUGE1_recall"),
+            "Avg_compression_ratio": mean_of_key(valid, "Compression_ratio"),
+            "Avg_latency": mean_of_key(valid, "Latency"),
+            "Avg_prompt_tokens": mean_of_key(valid, "Prompt_tokens"),
+            "Avg_completion_tokens": mean_of_key(valid, "Completion_tokens"),
             "Error": "; ".join(errors) if errors else None,
         }

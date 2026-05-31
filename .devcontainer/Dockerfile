@@ -1,44 +1,30 @@
-# ----------------------------
-# Stage 1: Build dependencies
-# ----------------------------
-FROM python:3.12-slim AS builder
+# Base image with CUDA 12.6 support (Ubuntu 24.04 ships Python 3.12 natively)
+FROM nvidia/cuda:12.6.0-cudnn-runtime-ubuntu24.04
+
+# Install Python 3.12 and system deps
+RUN apt-get update && apt-get install -y \
+    python3 python3-venv python3-pip python3-dev curl gcc libffi-dev zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://ollama.com/install.sh | sh
+
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# Create a virtualenv at a fixed path so Poetry and VS Code can find it
+RUN python3 -m venv /opt/venv
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:/root/.local/bin:$PATH"
 
 # Install Poetry
-RUN apt-get update && apt-get install -y curl gcc libffi-dev
-RUN curl -sSL https://install.python-poetry.org -o install-poetry.py
-RUN python3 install-poetry.py
+RUN curl -sSL https://install.python-poetry.org -o install-poetry.py \
+    && python install-poetry.py \
+    && rm install-poetry.py
 
-# Add Poetry to PATH
-ENV PATH="/root/.local/bin:$PATH"
-
-# Set workdir
 WORKDIR /app
 
-# Copy only pyproject.toml and poetry.lock first to install deps
-COPY pyproject.toml poetry.lock* /app/
-
-# Install dependencies into a virtual environment in /opt
-#RUN poetry config virtualenvs.create false \
-#    && poetry install --only main --no-interaction --no-ansi
-#RUN poetry install --only main --no-interaction --no-ansi
-# --------------------------
-# Stage 2: Run-time image
-# --------------------------
-FROM python:3.12-slim
-
-# Set working directory
-WORKDIR /app
-
-# Copy installed deps from builder stage
-COPY --from=builder /usr/local/lib/python3.12 /usr/local/lib/python3.12
-COPY --from=builder /usr/local/bin /usr/local/bin
-
-# Copy your source code
-COPY . /app
-
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Default run command (adjust if needed)
-#CMD ["python", "main.py"]
+# Install dependencies into the venv at build time so rebuilds use Docker cache
+COPY pyproject.toml poetry.lock* ./
+RUN poetry install --no-root --no-interaction --no-ansi

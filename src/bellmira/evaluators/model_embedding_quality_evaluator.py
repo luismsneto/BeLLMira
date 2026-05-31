@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import List, Dict, Optional, Tuple
 
@@ -5,6 +6,8 @@ import numpy as np
 
 from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
 from bellmira.llm_model.llm_model_client import ModelClient
+
+logger = logging.getLogger(__name__)
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -56,7 +59,7 @@ class ModelEmbeddingQualityEvaluator(ModelEvaluatorInterface):
         latency = time.time() - start
 
         if not response.ok:
-            print(f"Embedding request failed: {response.status_code} {response.reason}")
+            logger.warning("Embedding request failed: %s %s", response.status_code, response.reason)
             return None, latency, None
 
         try:
@@ -65,7 +68,7 @@ class ModelEmbeddingQualityEvaluator(ModelEvaluatorInterface):
             tokens = body.get("usage", {}).get("total_tokens")
             return vector, latency, tokens
         except (KeyError, IndexError, ValueError) as e:
-            print(f"Failed to parse embedding response: {e}")
+            logger.warning("Failed to parse embedding response: %s", e)
             return None, latency, None
 
     def evaluate(self, max_prompts: int = None) -> List[Dict]:
@@ -73,13 +76,13 @@ class ModelEmbeddingQualityEvaluator(ModelEvaluatorInterface):
         Evaluate each triplet. Returns a list of per-triplet result dicts.
         max_prompts limits the number of triplets evaluated (None = all).
         """
-        print("ModelEmbeddingQualityEvaluator: warming up model...")
+        logger.info("ModelEmbeddingQualityEvaluator: warming up model...")
         self.warm_up_model()
-        print("ModelEmbeddingQualityEvaluator: warm-up finished.")
+        logger.info("ModelEmbeddingQualityEvaluator: warm-up finished.")
         results = []
         triplets = self.triplets if max_prompts is None else self.triplets[:max_prompts]
         for i, (query, relevant, irrelevant) in enumerate(triplets):
-            print(f"  Triplet {i + 1}/{len(triplets)}: query='{query[:40]}...'")
+            logger.info("Triplet %d/%d: query='%s...'", i + 1, len(triplets), query[:40])
             q_vec, q_lat, q_tok = self._embed(query)
             r_vec, r_lat, r_tok = self._embed(relevant)
             ir_vec, ir_lat, ir_tok = self._embed(irrelevant)
@@ -109,12 +112,12 @@ class ModelEmbeddingQualityEvaluator(ModelEvaluatorInterface):
                 "Avg_latency": round((q_lat + r_lat + ir_lat) / 3, 4),
                 "Query_tokens": q_tok,
             }
-            print(f"    sim_rel={sim_rel:.4f}  sim_irr={sim_irr:.4f}  gap={gap:.4f}  correct={result['Correct_rank']}")
+            logger.debug("sim_rel=%.4f  sim_irr=%.4f  gap=%.4f  correct=%s", sim_rel, sim_irr, gap, result["Correct_rank"])
             results.append(result)
         return results
 
     def warm_up_model(self, warmup_count: int = 5, warmup_prompt: str = "Hello world."):
-        print(f"Warming up with {warmup_count} embedding requests...")
+        logger.debug("Warming up with %d embedding requests...", warmup_count)
         for i in range(warmup_count):
             try:
                 req = self.model_client.build_embedding_request(
@@ -123,11 +126,11 @@ class ModelEmbeddingQualityEvaluator(ModelEvaluatorInterface):
                 )
                 response = self.model_client.send_request(req)
                 if response.ok:
-                    print(f"  Warmup {i + 1} succeeded.")
+                    logger.debug("Warmup %d succeeded.", i + 1)
                 else:
-                    print(f"  Warmup {i + 1} failed: {response.status_code}")
+                    logger.warning("Warmup %d failed: %s", i + 1, response.status_code)
             except Exception as e:
-                print(f"  Warmup {i + 1} raised: {e}")
+                logger.warning("Warmup %d raised: %s", i + 1, e)
 
     def extract_threshold_metrics(self, results: List[Dict]) -> Dict:
         valid = [r for r in results if r.get("Sim_gap") is not None]

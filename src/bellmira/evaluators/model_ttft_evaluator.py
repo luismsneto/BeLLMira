@@ -1,8 +1,11 @@
+import logging
 import time
 from typing import Dict, List, Optional
 
 from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
 from bellmira.llm_model.llm_model_client import ModelClient
+
+logger = logging.getLogger(__name__)
 
 
 class ModelTTFTEvaluator(ModelEvaluatorInterface):
@@ -76,22 +79,22 @@ class ModelTTFTEvaluator(ModelEvaluatorInterface):
         }
 
     def evaluate(self, max_prompts: int = 1) -> Dict[str, List[Dict]]:
-        print("ModelTTFTEvaluator: warming up model...")
+        logger.info("ModelTTFTEvaluator: warming up model...")
         self.warm_up_model()
-        print("ModelTTFTEvaluator: warm-up finished.")
+        logger.info("ModelTTFTEvaluator: warm-up finished.")
         results_dict = {}
         for ref_key, context in self.prompt_context.items():
             results_dict[ref_key] = []
             for prompt in self.prompts[:max_prompts]:
                 full_prompt = context + "\n" + prompt
-                print(f"  [{ref_key}] streaming prompt: {prompt[:40]}...")
+                logger.info("[%s] streaming prompt: %s...", ref_key, prompt[:40])
                 stats = self._measure_stream(full_prompt)
                 results_dict[ref_key].append(stats)
-                print(f"  [{ref_key}] TTFT={stats.get('TTFT')}s  Total={stats.get('Total_time')}s  Chars={stats.get('Output_chars')}")
+                logger.debug("[%s] TTFT=%ss  Total=%ss  Chars=%s", ref_key, stats.get("TTFT"), stats.get("Total_time"), stats.get("Output_chars"))
         return results_dict
 
     def warm_up_model(self, warmup_count: int = 5, warmup_prompt: str = "Hello! Please respond quickly."):
-        print(f"Warming up with {warmup_count} streaming requests...")
+        logger.debug("Warming up with %d streaming requests...", warmup_count)
         for i in range(warmup_count):
             try:
                 req = self.model_client.build_chat_request(
@@ -102,11 +105,12 @@ class ModelTTFTEvaluator(ModelEvaluatorInterface):
                 )
                 for _ in self.model_client.stream_chat_response(req):
                     pass
-                print(f"  Warmup {i + 1} done.")
+                logger.debug("Warmup %d done.", i + 1)
             except Exception as e:
-                print(f"  Warmup {i + 1} failed: {e}")
+                logger.warning("Warmup %d failed: %s", i + 1, e)
 
     def compute_averages(self, results_dict: Dict[str, List[Dict]]) -> Dict[str, Dict]:
+        # Override: averages TTFT-specific fields instead of the standard token/latency fields.
         averages = {}
         for key, entries in results_dict.items():
             ttft_values = [e["TTFT"] for e in entries if e.get("TTFT") is not None]

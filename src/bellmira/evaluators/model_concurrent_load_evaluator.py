@@ -1,3 +1,4 @@
+import logging
 import time
 import threading
 import itertools
@@ -5,6 +6,8 @@ from typing import Dict, List, Optional
 
 from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
 from bellmira.llm_model.llm_model_client import ModelClient
+
+logger = logging.getLogger(__name__)
 
 
 class ModelParallelLoadEvaluator(ModelEvaluatorInterface):
@@ -91,14 +94,14 @@ class ModelParallelLoadEvaluator(ModelEvaluatorInterface):
         start_time = time.time()
         for i in range(concurrency):
             prompt = next(prompt_cycle)
-            print(f"Concurrency {concurrency}: Running thread for prompt: {prompt[:20]}")
+            logger.debug("Concurrency %d: Running thread for prompt: %s", concurrency, prompt[:20])
             t = threading.Thread(target=worker, args=(prompt,))
             threads.append(t)
             t.start()
 
         for t in threads:
             t.join()
-        print(f"Concurrency {concurrency}: Joined all threads!")
+        logger.debug("Concurrency %d: Joined all threads.", concurrency)
         duration = time.time() - start_time
 
         throughput = concurrency / duration if duration > 0 else 0
@@ -113,7 +116,7 @@ class ModelParallelLoadEvaluator(ModelEvaluatorInterface):
             "Requests": len(latencies),
             "Status_codes": status_counts,
         }
-        print(f"Concurrency {concurrency}: Result: {result}")
+        logger.debug("Concurrency %d: Result: %s", concurrency, result)
         return result
 
     def evaluate(self, max_prompts: int = 1) -> Dict[str, Dict[str, Dict]]:
@@ -122,11 +125,11 @@ class ModelParallelLoadEvaluator(ModelEvaluatorInterface):
         for ref_key, context in self.prompt_context.items():
             for concurrency in self.concurrency_levels:
                 key = f"{concurrency}_par_req"
-                print(f"Running {key} with {ref_key} context...")
+                logger.info("Running %s with %s context...", key, ref_key)
                 stats = self._run_concurrent_requests(context, concurrency)
                 error_codes = [code for code, count in stats["Status_codes"].items() if code >= 400 and count > 0]
                 if error_codes:
-                    print(f"Error {error_codes} detected for {key} with {ref_key} context. Skipping...")
+                    logger.warning("Error %s detected for %s with %s context. Skipping...", error_codes, key, ref_key)
                     return results_dict
                 avg_tokens = stats["Avg_prompt_tokens"]
                 label = f"{avg_tokens // 1000}k_tokens"
@@ -134,24 +137,6 @@ class ModelParallelLoadEvaluator(ModelEvaluatorInterface):
                     results_dict[key] = {}
                 results_dict[key][label] = stats
         return results_dict
-
-    def warm_up_model(self, warmup_count: int = 10, warmup_prompt: str = "Hello! Please respond quickly."):
-        print(f"Warming up the model with {warmup_count} requests...")
-        for i in range(warmup_count):
-            try:
-                req = self.model_client.build_chat_request(
-                    warmup_prompt,
-                    system_prompt=None,
-                    model_name=self.model_name,
-                    temperature=0,
-                )
-                response = self.model_client.send_request(req)
-                if response.ok:
-                    print(f"Warmup request {i+1} succeeded.")
-                else:
-                    print(f"Warmup request {i+1} failed with code {response.status_code}.")
-            except Exception as e:
-                print(f"Warmup request {i+1} raised an error: {e}")
 
     def extract_threshold_metrics(self, results: dict) -> dict:
         extracted = {}

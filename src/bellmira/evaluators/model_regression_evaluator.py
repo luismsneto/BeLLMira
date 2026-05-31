@@ -1,10 +1,14 @@
 import json
+import logging
 import time
 from typing import Dict, List, Optional, Tuple
 
 from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
-from bellmira.evaluators.model_summarization_evaluator import rouge_l
+from bellmira.utils.text_metrics import rouge_l
+from bellmira.utils.metrics_utils import mean_of_key
 from bellmira.llm_model.llm_model_client import ModelClient
+
+logger = logging.getLogger(__name__)
 
 # Keywords used to detect refusal responses heuristically
 _REFUSAL_PHRASES = (
@@ -19,6 +23,8 @@ def _is_refusal(text: str) -> bool:
     return any(phrase in lowered for phrase in _REFUSAL_PHRASES)
 
 
+# Parses a JSON *string* (json.loads) — distinct from ModelClient.is_valid_json,
+# which checks whether a Python *object* is JSON-serialisable (json.dumps).
 def _is_valid_json(text: str) -> bool:
     try:
         json.loads(text)
@@ -76,8 +82,8 @@ class ModelRegressionEvaluator(ModelEvaluatorInterface):
         self.baseline_model_name = self.baseline_client.get_model_name()
         self.candidate_model_name = self.candidate_client.get_model_name()
 
-        print(f"Baseline:  {baseline_url}  →  {self.baseline_model_name}")
-        print(f"Candidate: {candidate_url}  →  {self.candidate_model_name}")
+        logger.info("Baseline:  %s  ->  %s", baseline_url, self.baseline_model_name)
+        logger.info("Candidate: %s  ->  %s", candidate_url, self.candidate_model_name)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -116,7 +122,7 @@ class ModelRegressionEvaluator(ModelEvaluatorInterface):
                 response.status_code,
             )
         except (KeyError, IndexError, ValueError) as e:
-            print(f"Failed to parse response: {e}")
+            logger.warning("Failed to parse response: %s", e)
             return None, latency, None, None, response.status_code
 
     # ------------------------------------------------------------------
@@ -124,7 +130,7 @@ class ModelRegressionEvaluator(ModelEvaluatorInterface):
     # ------------------------------------------------------------------
 
     def warm_up_model(self, warmup_count: int = 3, warmup_prompt: str = "Hello! Please respond quickly."):
-        print(f"Warming up baseline and candidate with {warmup_count} requests each...")
+        logger.debug("Warming up baseline and candidate with %d requests each...", warmup_count)
         for client, name in (
             (self.baseline_client, "baseline"),
             (self.candidate_client, "candidate"),
@@ -142,25 +148,27 @@ class ModelRegressionEvaluator(ModelEvaluatorInterface):
                         max_tokens=32,
                     )
                     response = client.send_request(req)
-                    status = "ok" if response.ok else response.status_code
-                    print(f"  [{name}] warmup {i + 1}: {status}")
+                    if response.ok:
+                        logger.debug("[%s] warmup %d: ok", name, i + 1)
+                    else:
+                        logger.warning("[%s] warmup %d: %s", name, i + 1, response.status_code)
                 except Exception as e:
-                    print(f"  [{name}] warmup {i + 1} raised: {e}")
+                    logger.warning("[%s] warmup %d raised: %s", name, i + 1, e)
 
     def evaluate(self, max_prompts: int = None) -> List[Dict]:
         """
         Run all prompts against both models and return per-prompt comparison dicts.
         max_prompts limits the number of prompts evaluated (None = all).
         """
-        print("ModelRegressionEvaluator: warming up models...")
+        logger.info("ModelRegressionEvaluator: warming up models...")
         self.warm_up_model()
-        print("ModelRegressionEvaluator: warm-up finished.")
+        logger.info("ModelRegressionEvaluator: warm-up finished.")
 
         prompts = self.prompts if max_prompts is None else self.prompts[:max_prompts]
         results = []
 
         for i, prompt in enumerate(prompts):
-            print(f"  Prompt {i + 1}/{len(prompts)}: '{prompt[:60]}...'")
+            logger.info("Prompt %d/%d: '%s...'", i + 1, len(prompts), prompt[:60])
 
             b_text, b_lat, b_ptok, b_ctok, b_code = self._query(
                 self.baseline_client, self.baseline_model_name, prompt
@@ -211,9 +219,9 @@ class ModelRegressionEvaluator(ModelEvaluatorInterface):
                 result["Baseline_json_valid"] = b_json_valid
                 result["Candidate_json_valid"] = c_json_valid
 
-            print(
-                f"    exact={exact_match}  rouge_drift={rougel_drift}  "
-                f"lat_delta={latency_delta:+.3f}s  ctok_delta={ctok_delta}"
+            logger.debug(
+                "exact=%s  rouge_drift=%s  lat_delta=%+.3fs  ctok_delta=%s",
+                exact_match, rougel_drift, latency_delta, ctok_delta,
             )
             results.append(result)
 
@@ -234,16 +242,15 @@ class ModelRegressionEvaluator(ModelEvaluatorInterface):
         valid = [r for r in results if r["Baseline_output"] and r["Candidate_output"]]
         n_valid = len(valid)
 
-        def mean(key):
-            vals = [r[key] for r in valid if r.get(key) is not None]
-            return round(sum(vals) / len(vals), 4) if vals else None
-
         def rate(key, value=True):
             vals = [r[key] for r in valid if r.get(key) is not None]
             return round(sum(1 for v in vals if v == value) / len(vals), 4) if vals else None
 
         b_errors = sum(1 for r in results if r["Baseline_status"] != 200)
         c_errors = sum(1 for r in results if r["Candidate_status"] != 200)
+
+        avg_latency_delta = mean_of_key(valid, "Latency_delta")
+        avg_baseline_latency = mean_of_key(valid, "Baseline_latency")
 
         metrics = {
             "Baseline_model": self.baseline_model_name,
@@ -254,19 +261,19 @@ class ModelRegressionEvaluator(ModelEvaluatorInterface):
             "Candidate_error_count": c_errors,
             # Quality
             "Exact_match_rate": rate("Exact_match", True),
-            "Avg_ROUGEL_drift": mean("ROUGEL_drift"),
+            "Avg_ROUGEL_drift": mean_of_key(valid, "ROUGEL_drift"),
             # Latency
-            "Avg_baseline_latency": mean("Baseline_latency"),
-            "Avg_candidate_latency": mean("Candidate_latency"),
-            "Avg_latency_delta": mean("Latency_delta"),
+            "Avg_baseline_latency": avg_baseline_latency,
+            "Avg_candidate_latency": mean_of_key(valid, "Candidate_latency"),
+            "Avg_latency_delta": avg_latency_delta,
             "Avg_latency_delta_pct": (
-                round(mean("Latency_delta") / mean("Baseline_latency") * 100, 2)
-                if mean("Baseline_latency") else None
+                round(avg_latency_delta / avg_baseline_latency * 100, 2)
+                if avg_baseline_latency else None
             ),
             # Tokens
-            "Avg_baseline_completion_tokens": mean("Baseline_completion_tokens"),
-            "Avg_candidate_completion_tokens": mean("Candidate_completion_tokens"),
-            "Avg_completion_tokens_delta": mean("Completion_tokens_delta"),
+            "Avg_baseline_completion_tokens": mean_of_key(valid, "Baseline_completion_tokens"),
+            "Avg_candidate_completion_tokens": mean_of_key(valid, "Candidate_completion_tokens"),
+            "Avg_completion_tokens_delta": mean_of_key(valid, "Completion_tokens_delta"),
             # Behaviour
             "Baseline_refusal_rate": rate("Baseline_refusal", True),
             "Candidate_refusal_rate": rate("Candidate_refusal", True),

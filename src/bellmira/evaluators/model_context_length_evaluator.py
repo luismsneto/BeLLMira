@@ -1,8 +1,11 @@
+import logging
 import time
 from typing import Dict, List, Optional
 
 from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
 from bellmira.llm_model.llm_model_client import ModelClient
+
+logger = logging.getLogger(__name__)
 
 
 class ModelContextLengthEvaluator(ModelEvaluatorInterface):
@@ -32,18 +35,19 @@ class ModelContextLengthEvaluator(ModelEvaluatorInterface):
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
         json_schema: Optional[dict] = None,
-        type: str = "chat",
+        request_type: str = "chat",
     ):
         """
         Args:
-            url:           Model server base URL.
-            prompts:       Questions / instructions appended after each context.
-            contexts:      Dict mapping a label to a context string.
-                           Build with ``context_utils.*``.
-            temperature:   Sampling temperature.
+            url:          Model server base URL.
+            prompts:      Questions / instructions appended after each context.
+            contexts:     Dict mapping a label to a context string.
+                          Build with ``context_utils.*``.
+            temperature:  Sampling temperature.
             system_prompt: Optional system prompt.
-            json_schema:   Optional guided-JSON schema.
-            type:          ``"chat"`` or ``"embedding"``.
+            json_schema:  Optional guided-JSON schema.
+            request_type: ``"chat"`` or ``"embedding"`` (renamed from ``type``
+                          to avoid shadowing the built-in).
         """
         self.model_url = url
         self.prompts = prompts
@@ -51,28 +55,28 @@ class ModelContextLengthEvaluator(ModelEvaluatorInterface):
         self.temperature = temperature
         self.system_prompt = system_prompt
         self.json_schema = json_schema
-        self.type = type
+        self.request_type = request_type
         self.model_client = ModelClient(base_url=self.model_url)
         self.model_name = self.model_client.get_model_name()
-        print("ModelContextLengthEvaluator initialized.")
+        logger.info("ModelContextLengthEvaluator initialized.")
 
     def evaluate(self, max_prompts: int = 2) -> Dict[str, List[Dict]]:
-        print("ModelContextLengthEvaluator warming up model...")
+        logger.info("ModelContextLengthEvaluator warming up model...")
         self.warm_up_model()
-        print("ModelContextLengthEvaluator warm up model finished.")
+        logger.info("ModelContextLengthEvaluator warm up model finished.")
         results_dict = {}
         for ref_key, context in self.prompt_context.items():
             results_dict[ref_key] = []
             for prompt in self.prompts[:max_prompts]:
                 start_time = time.time()
-                if self.type == "chat":
+                if self.request_type == "chat":
                     req = self.model_client.build_chat_request(
                         context + "\n" + prompt,
                         system_prompt=self.system_prompt,
                         model_name=self.model_name,
                         temperature=self.temperature,
                     )
-                elif self.type == "embedding":
+                elif self.request_type == "embedding":
                     req = self.model_client.build_embedding_request(
                         input_text=context + "\n" + prompt,
                         model_name=self.model_name,
@@ -103,63 +107,36 @@ class ModelContextLengthEvaluator(ModelEvaluatorInterface):
         return results_dict
 
     def warm_up_model(self, warmup_count: int = 10, warmup_prompt: str = "Hello! Please respond quickly."):
-        print(f"Warming up the model with {warmup_count} requests...")
+        logger.debug("Warming up the model with %d requests...", warmup_count)
         for i in range(warmup_count):
             try:
-                if self.type == "chat":
+                if self.request_type == "chat":
                     req = self.model_client.build_chat_request(
                         warmup_prompt,
                         system_prompt=None,
                         model_name=self.model_name,
                         temperature=0,
                     )
-                elif self.type == "embedding":
+                elif self.request_type == "embedding":
                     req = self.model_client.build_embedding_request(
                         input_text=warmup_prompt,
                         model_name=self.model_name,
                     )
                 response = self.model_client.send_request(req)
                 if response.ok:
-                    print(f"Warmup request {i+1} succeeded.")
+                    logger.debug("Warmup request %d succeeded.", i + 1)
                 else:
-                    print(f"Warmup request {i+1} failed with code {response.status_code}.")
+                    logger.warning("Warmup request %d failed with code %s.", i + 1, response.status_code)
             except Exception as e:
-                print(f"Warmup request {i+1} raised an error: {e}")
-
-    def compute_averages(self, results_dict: Dict[str, List[Dict]]) -> Dict[str, Dict]:
-        avg_results = {}
-        for key, results in results_dict.items():
-            total_exec, total_tokens, prompt_tokens, comp_tokens = 0, 0, 0, 0
-            n, token_entries = 0, 0
-            error_msg = None
-            for result in results:
-                if "Execution_time" in result:
-                    n += 1
-                    total_exec += result["Execution_time"]
-                    if result["Total_tokens"] is not None:
-                        token_entries += 1
-                        total_tokens += result["Total_tokens"]
-                        prompt_tokens += result["Prompt_tokens"]
-                        comp_tokens += result["Completion_tokens"]
-                if result["Code"] != 200:
-                    error_msg = f"{result['Code']} {result['Message']}"
-            avg_result = {"Avg_execution_time": round(total_exec / n) if n else None}
-            if token_entries:
-                avg_result.update({
-                    "Avg_total_tokens": round(total_tokens / token_entries),
-                    "Avg_prompt_tokens": round(prompt_tokens / token_entries),
-                    "Avg_completion_tokens": round(comp_tokens / token_entries),
-                })
-            if error_msg:
-                avg_result["Errors"] = error_msg
-            avg_results[key] = avg_result
-        return avg_results
+                logger.warning("Warmup request %d raised an error: %s", i + 1, e)
 
     def extract_threshold_metrics(
         self,
         data: dict,
-        token_thresholds: List[int] = [1000, 2000, 4000, 7500, 12000, 16000, 20000, 24000, 32000],
+        token_thresholds: Optional[List[int]] = None,
     ) -> dict:
+        if token_thresholds is None:
+            token_thresholds = [1000, 2000, 4000, 7500, 12000, 16000, 20000, 24000, 32000]
         averages = self.compute_averages(data)
         threshold_columns = [f"{t // 1000}k Tok Avg Time" for t in token_thresholds]
         row = {}

@@ -1,9 +1,11 @@
+import logging
 import os
 import threading
-import traceback
 import pandas as pd
 import datetime
 from threading import Lock
+
+logger = logging.getLogger(__name__)
 
 
 class CSVWriter:
@@ -12,21 +14,28 @@ class CSVWriter:
     @staticmethod
     def write(df: pd.DataFrame, path: str, all_columns: list[str]):
         with CSVWriter._lock:
-            file_exists = os.path.isfile(path)
-            if file_exists:
-                with open(path, 'r', encoding='utf-8') as f:
-                    existing_header = f.readline().strip().split(",")
-                if set(all_columns) != set(existing_header):
-                    df_existing = pd.read_csv(path)
-                    for col in all_columns:
-                        if col not in df_existing.columns:
-                            df_existing[col] = None
-                    new_column_order = list(df_existing.columns)
-                    df_existing = df_existing[new_column_order]
-                    df_existing.to_csv(path, index=False)
-                    file_exists = False  # Force header rewrite
+            if not os.path.isfile(path):
+                df.to_csv(path, mode='w', header=True, index=False)
+                return
 
-            df.to_csv(path, mode='a', header=not file_exists, index=False)
+            with open(path, 'r', encoding='utf-8') as f:
+                first_line = f.readline().strip()
+
+            if not first_line:
+                # File exists but is empty
+                df.to_csv(path, mode='w', header=True, index=False)
+                return
+
+            existing_header = first_line.split(",")
+
+            if set(all_columns) == set(existing_header):
+                # Columns unchanged — efficient append, no header
+                df.to_csv(path, mode='a', header=False, index=False)
+            else:
+                # New columns appeared — reread, merge new row, rewrite once with expanded header
+                df_existing = pd.read_csv(path)
+                combined = pd.concat([df_existing, df], ignore_index=True)
+                combined.to_csv(path, mode='w', header=True, index=False)
 
 
 class ParquetWriter:
@@ -107,5 +116,4 @@ class ExperimentLogger:
             row.setdefault("Datetime", now)
             FileWriter.write_row(row, self.file_path, self.columns, self.file_type)
         except Exception as e:
-            print(f"Failed to log row to {self.file_path}: {e}")
-            traceback.print_exc()
+            logger.error("Failed to log row to %s: %s", self.file_path, e, exc_info=True)

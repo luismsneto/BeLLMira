@@ -1,3 +1,4 @@
+import logging
 import time
 import requests
 from pathlib import Path
@@ -6,9 +7,12 @@ import json
 from collections import Counter
 import pandas as pd
 
+from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
 from bellmira.llm_model.llm_model_client import ModelClient
 
-class ModelClassificationEvaluator():
+logger = logging.getLogger(__name__)
+
+class ModelClassificationEvaluator(ModelEvaluatorInterface):
     def __init__(
         self,
         input_col: str,
@@ -18,8 +22,25 @@ class ModelClassificationEvaluator():
         data_format: str = "parquet",
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
-        json_schema: Optional[dict] = None
+        json_schema: Optional[dict] = None,
+        dbutils=None,
+        spark=None,
     ):
+        """
+        Args:
+            input_col:    Column name containing the model input text.
+            output_col:   Column name containing the ground-truth label.
+            url:          Model server base URL.
+            data_path:    Path prefixed with a scheme: ``file:``, ``dbfs:``, or ``adls:``.
+            data_format:  File format — ``"parquet"``, ``"csv"``, or ``"json"``.
+            temperature:  Sampling temperature.
+            system_prompt: Optional system prompt.
+            json_schema:  Optional guided-JSON schema.
+            dbutils:      Databricks ``dbutils`` object. Required for ``adls:`` paths.
+                          Pass explicitly; ``globals()`` lookup has been removed.
+            spark:        Databricks ``SparkSession``. Required for ``adls:`` and ``dbfs:`` paths.
+                          Pass explicitly; ``globals()`` lookup has been removed.
+        """
         prefix, path = data_path.split(":", 1)
         path = path.lstrip("/").strip()
         self._use_spark = False
@@ -28,18 +49,16 @@ class ModelClassificationEvaluator():
             case "s3":
                 raise NotImplementedError("S3 path handling is not yet implemented")
             case "dbfs":
-                print("Handling DBFS path")
+                logger.info("Handling DBFS path")
                 self._use_spark = True
             case "file":
-                print("Handling local file path")
+                logger.info("Handling local file path")
             case "adls":
-                print("Handling ADLS path")
-                dbutils = globals().get('dbutils')
-                spark = globals().get('spark')
+                logger.info("Handling ADLS path")
                 if dbutils is None or spark is None:
                     raise RuntimeError(
-                        "'dbutils' and 'spark' globals are required for ADLS paths. "
-                        "This feature is only supported in a Databricks environment."
+                        "'dbutils' and 'spark' constructor parameters are required for ADLS paths. "
+                        "Pass them explicitly; this feature is only supported in a Databricks environment."
                     )
                 try:
                     client_id = dbutils.secrets.get(scope="DataBricksKVScopeAIP", key="DTBK002-SPNClientID-AI")
@@ -53,28 +72,27 @@ class ModelClassificationEvaluator():
                     spark.conf.set("fs.azure.account.oauth2.client.secret", client_secret)
                     spark.conf.set("fs.azure.account.oauth2.client.endpoint", tenant_id_endpoint)
 
-                    print("ADLS access configured successfully.")
+                    logger.info("ADLS access configured successfully.")
+                    data_path = datalake_url + path
                 except Exception as e:
-                    print(f"Error configuring ADLS access: {e}")
-                    print("Please ensure Databricks secrets scope 'DataBricksKVScopeAIP' and the required keys exist.")
+                    logger.error("Error configuring ADLS access: %s", e, exc_info=True)
+                    logger.error("Please ensure Databricks secrets scope 'DataBricksKVScopeAIP' and the required keys exist.")
                     raise
-                data_path = datalake_url + path
                 self._use_spark = True
             case _:
                 raise ValueError(f"Unknown data path prefix: '{prefix}'")
 
         if self._use_spark:
-            spark = globals().get('spark')
             if spark is None:
                 raise RuntimeError(
-                    "'spark' global is required for this data path prefix. "
-                    "This feature is only supported in a Databricks environment."
+                    "'spark' constructor parameter is required for this data path prefix. "
+                    "Pass it explicitly; this feature is only supported in a Databricks environment."
                 )
             try:
                 data_df = spark.read.format(data_format).load(data_path)
                 data_df.createOrReplaceTempView("categories_raw")
             except Exception as e:
-                print(f"Error loading data from {data_path}: {e}")
+                logger.error("Error loading data from %s: %s", data_path, e, exc_info=True)
                 raise
             self.data = data_df
         else:
@@ -93,35 +111,13 @@ class ModelClassificationEvaluator():
         self.input_col = input_col
         self.output_col = output_col
 
-    def warm_up_model(self, warmup_count: int = 10, warmup_prompt: str = "Hello! Please respond quickly."):
-        """
-        Send a few dummy requests to warm up the model.
-        """
-        print(f"Warming up the model with {warmup_count} requests...")
-        for i in range(warmup_count):
-            try:
-                req = self.model_client.build_chat_request(
-                    warmup_prompt,
-                    system_prompt=None,
-                    model_name=self.model_name,
-                    temperature=0
-                )
-                response = self.model_client.send_request(req)
-                if response.ok:
-                    print(f"Warmup request {i+1} succeeded.")
-                else:
-                    print(f"Warmup request {i+1} failed with code {response.status_code}.")
-            except Exception as e:
-                print(f"Warmup request {i+1} raised an error: {e}")
-
     def evaluate(self, max_prompts: int = 2) -> Dict[str, List[Dict]]:
-        print("ClassificationEvaluator warming up model...")
+        logger.info("ClassificationEvaluator warming up model...")
         self.warm_up_model(warmup_count=3)
-        print("ClassificationEvaluator warm up model finished.")
+        logger.info("ClassificationEvaluator warm up model finished.")
         results_dict = {}
 
         batch = self.data.limit(max_prompts).toPandas() if self._use_spark else self.data.head(max_prompts)
-        texts = []
 
         if self.input_col not in batch or self.output_col not in batch:
             raise ValueError(f"Batch is missing required columns: {self.input_col} or {self.output_col}")
@@ -146,10 +142,8 @@ class ModelClassificationEvaluator():
                 return results_dict
             try:
                 result_json = result.json()
-                message = result_json.get("message") if result.status_code != 200 else None
                 usage = result_json.get("usage", {})
             except ValueError:
-                message = f"Non-JSON response: {result.text[:200]}"
                 usage = {}
             request_stats = {
                 "Code": result.status_code,
@@ -160,7 +154,7 @@ class ModelClassificationEvaluator():
                 "Prediction": result_json.get("choices", {})[0].get("message", {}).get("content"),
                 "Label":assistant_output
             }
-            print(request_stats)
+            logger.debug("Request stats: %s", request_stats)
             results_list.append(request_stats)
         return results_list
         
@@ -173,7 +167,9 @@ class ModelClassificationEvaluator():
         avg_execution_time = sum(r["Execution_time"] for r in results) / n
         avg_prompt_tokens = sum(r["Prompt_tokens"] for r in results) / n
         avg_completion_tokens = sum(r["Completion_tokens"] for r in results) / n
-        [errors.append(r["Message"]) for r in results if r["Code"] != 200]
+        for r in results:
+            if r["Code"] != 200:
+                errors.append(r["Message"])
         labels = set(r["Label"] for r in results)
         preds = set(r["Prediction"] for r in results)
         classes = sorted(labels | preds)

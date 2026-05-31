@@ -6,13 +6,17 @@
   },
   "settings": {
     "terminal.integrated.defaultProfile.linux": "bash",
-    "python.defaultInterpreterPath": "/usr/local/bin/python"
+    "python.defaultInterpreterPath": "/opt/venv/bin/python"
   },
   "extensions": [
     "ms-python.python",
     "ms-python.vscode-pylance",
     "esbenp.prettier-vscode"
   ],
-  "postCreateCommand": "pip install poetry",
-  "remoteUser": "root"
+  "remoteUser": "root",
+  "runArgs": ["--gpus", "all"],
+  "hostRequirements": {
+    "gpu": true
+  },
+  "forwardPorts": [8080, 11434]
 }

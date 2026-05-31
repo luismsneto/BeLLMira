@@ -3,24 +3,32 @@ import json
 import shlex
 
 class ModelClient:
+    """HTTP client for interacting with an OpenAI-compatible inference server."""
+
     def __init__(self, base_url="http://localhost:8080/"):
+        """
+        Args:
+            base_url: Base URL of the inference server.
+        """
         self.base_url = base_url
         self.session = requests.Session()
 
     def get_model_name(self) -> str:
+        """Return the ID of the first model reported by the server."""
         url = self.base_url + "v1/models/"
-        response = requests.get(url)
-        response.raise_for_status()  # Raise HTTPError if not 2xx
+        response = self.session.get(url)
+        response.raise_for_status()
 
         try:
             return response.json()["data"][0]["id"]
         except (KeyError, IndexError, ValueError) as e:
             raise Exception(f"Could not parse model name: {e}")
 
-    def get_models_name_list(self) -> str:
+    def get_models_name_list(self) -> list[str]:
+        """Return the IDs of all models reported by the server."""
         url = self.base_url + "v1/models/"
-        response = requests.get(url)
-        response.raise_for_status()  # Raise HTTPError if not 2xx
+        response = self.session.get(url)
+        response.raise_for_status()
         try:
             return [model['id'] for model in response.json()["data"]]
         except(KeyError, IndexError, ValueError) as e:
@@ -28,6 +36,7 @@ class ModelClient:
         
     @staticmethod
     def is_valid_json(data):
+        """Return True if *data* can be serialised to JSON without error."""
         try:
             json.dumps(data)
             return True
@@ -39,13 +48,33 @@ class ModelClient:
         user_prompt,
         system_prompt=None,
         model_name="/app/model/model",
-        temperature=0,
+        temperature=0.0,
         max_tokens=1000,
         json_schema=None,
+        use_guided_json: bool = False,
         assistant_messages=None,
         image_prompt=None,
         enable_thinking: bool = None,
     ):
+        """Build an unsigned POST request for the chat completions endpoint.
+
+        Args:
+            user_prompt: The user turn text.
+            system_prompt: Optional system message prepended to the conversation.
+            model_name: Model path or identifier served by the backend.
+            temperature: Sampling temperature.
+            max_tokens: Maximum tokens to generate.
+            json_schema: JSON schema dict for structured output.
+            use_guided_json: When True, send schema via `guided_json` (vLLM)
+                instead of `response_format`.
+            assistant_messages: Prior assistant turns to include for multi-turn chat.
+            image_prompt: Base-64 encoded PNG to attach as a vision input.
+            enable_thinking: When set, enables or disables chain-of-thought via
+                `chat_template_kwargs`.
+
+        Returns:
+            requests.Request ready to be prepared and sent.
+        """
         url = self.base_url + "v1/chat/completions"
         messages = []
         if system_prompt:
@@ -76,7 +105,16 @@ class ModelClient:
             "temperature": temperature
         }
         if json_schema is not None:
-            data["guided_json"] = json_schema
+            if use_guided_json:
+                data["guided_json"] = json_schema
+            else:
+                data["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "response",
+                        "schema": json_schema
+                    }
+                }
         if max_tokens is not None:
             data["max_tokens"] = max_tokens
         if enable_thinking is not None: 
@@ -92,6 +130,16 @@ class ModelClient:
         model_name="/app/model/embedding",
         user_id=None
     ):
+        """Build an unsigned POST request for the embeddings endpoint.
+
+        Args:
+            input_text: Text or list of texts to embed.
+            model_name: Embedding model path or identifier.
+            user_id: Optional end-user identifier forwarded to the server.
+
+        Returns:
+            requests.Request ready to be prepared and sent.
+        """
         url = self.base_url + "v1/embeddings"
         headers = {'Content-Type': 'application/json'}
         data = {
@@ -113,6 +161,17 @@ class ModelClient:
         modelname="/app/model/rerank",
         top_n=None
     ):
+        """Build an unsigned POST request for the reranking endpoint.
+
+        Args:
+            query: Query string used to score relevance.
+            documents: List of candidate document strings to rerank.
+            modelname: Reranker model path or identifier.
+            top_n: If set, return only the top-n ranked documents.
+
+        Returns:
+            requests.Request ready to be prepared and sent.
+        """
         url = self.base_url + "v1/rerank"
         headers = {'Content-Type': 'application/json'}
         data = {
@@ -129,6 +188,7 @@ class ModelClient:
         return requests.Request("POST", url, headers=headers, json=data)
 
     def send_request(self, request):
+        """Prepare and send a requests.Request, returning the response."""
         prepared = self.session.prepare_request(request)
         return self.session.send(prepared)
 
@@ -166,6 +226,7 @@ class ModelClient:
                     yield text
 
     def print_curl(self, request):
+        """Return the request as an equivalent curl command string."""
         prepared = self.session.prepare_request(request)
         parts = ["curl", "-X", prepared.method]
 
@@ -185,6 +246,7 @@ class ModelClient:
         return " ".join(parts)
 
     def print_json(self, request):
+        """Return the request body as a pretty-printed JSON string."""
         prepared = self.session.prepare_request(request)
         body = prepared.body
         if isinstance(body, bytes):
@@ -196,6 +258,7 @@ class ModelClient:
             return body or "{}"
 
     def print_invoke_webrequest(self, request):
+        """Return the request as an equivalent PowerShell Invoke-WebRequest command string."""
         prepared = self.session.prepare_request(request)
 
         parts = ["$body = ("]
@@ -238,6 +301,7 @@ class ModelClient:
         return "\n".join(parts + [""] + [" ".join(cmd)])
 
     def print_request_cmds(self, request):
+        """Print the request as both a curl command and a PowerShell Invoke-WebRequest command."""
         print("# curl")
         print(self.print_curl(request))
         print()
