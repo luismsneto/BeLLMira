@@ -218,6 +218,7 @@ src/bellmira/
 │   ├── llm_model.py          # LLMModel — download, serve, register
 │   └── llm_model_client.py   # ModelClient — HTTP client for the inference API
 ├── evaluators/               # All inherit ModelEvaluatorInterface
+│   ├── evaluator_interface.py
 │   ├── model_context_length_evaluator.py
 │   ├── model_ttft_evaluator.py
 │   ├── model_concurrent_load_evaluator.py
@@ -226,10 +227,14 @@ src/bellmira/
 │   ├── model_embedding_quality_evaluator.py
 │   ├── model_summarization_evaluator.py
 │   └── model_regression_evaluator.py
-├── llm_experiments/          # Multi-model orchestration, CSV logging
-└── utils/                    # Context builders, ROUGE metrics, aggregation helpers
-notebooks/                    # Tutorial notebooks (one per evaluator)
-tutorial/                     # Step-by-step tutorial notebooks
+├── llm_experiments/          # Multi-model orchestration, experiment logging
+└── utils/
+    ├── context_utils.py      # Context builders for evaluators
+    ├── text_metrics.py       # ROUGE-N, ROUGE-L, compression ratio
+    ├── metrics_utils.py      # Aggregation helpers
+    └── dict_logger.py        # ExperimentLogger — CSV, Parquet, and Delta table output
+notebooks/                    # Operational notebooks (deploy, query, modality tests)
+tutorial/                     # Step-by-step tutorial notebooks (one per evaluator)
 ```
 
 ## Quick start
