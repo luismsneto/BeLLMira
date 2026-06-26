@@ -205,6 +205,8 @@ class LLMModel():
         gpu_memory_utilization: float = None,
         cpu_offload: float = None,
         enable_prefix_caching: bool = False,
+        enforce_eager: bool = False,
+        max_num_seqs: int = None,
         disable_logs: bool = False,
     ) -> None:
         """
@@ -222,6 +224,8 @@ class LLMModel():
             gpu_memory_utilization (float, optional): Fraction of GPU memory to reserve for the model.
             cpu_offload (float, optional): GB of model weights to offload to CPU.
             enable_prefix_caching (bool): Whether to enable automatic prefix caching.
+            enforce_eager (bool): Disable torch.compile/CUDA graphs and use eager execution.
+                Useful when nvcc is not installed. Slight throughput penalty.
             disable_logs (bool): Whether to disable request and stats logging.
         """
         base_cmd = [
@@ -238,7 +242,7 @@ class LLMModel():
         if reasoning_parser:
             base_cmd.extend(["--reasoning-parser", reasoning_parser])
         if self.hf_filename:
-            model_path = f"{self.tmp_model_path}/{self.hf_filename}"
+            model_path = str(Path(self.tmp_model_path, self.hf_filename).resolve())
             base_cmd.extend(["--model", model_path, "--tokenizer", self.repo_id])
         else:
             base_cmd.extend(["--model", self.repo_id])
@@ -254,18 +258,51 @@ class LLMModel():
             base_cmd.extend([f"--cpu-offload-gb={cpu_offload}"])
         if enable_prefix_caching:
             base_cmd.extend(["--enable-prefix-caching=True"])
+        if enforce_eager:
+            base_cmd.extend(["--enforce-eager"])
+        if max_num_seqs:
+            base_cmd.extend([f"--max-num-seqs={max_num_seqs}"])
+
+        if sys.platform == "win32":
+            base_cmd = self._wrap_wsl(base_cmd)
 
         logger.info("Model Server: Running command: %s", " ".join(base_cmd))
+        print(f"Model Server: Running command: {' '.join(base_cmd)}", flush=True)
         if stop_event is None and server_finished_event is None:
             logger.info("Model Server: Running on current thread (blocking execution)")
-            subprocess.run(base_cmd, check=True)
+            process = subprocess.Popen(
+                base_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            output_lines = []
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                output_lines.append(line)
+            process.wait()
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"Model server exited with code {process.returncode}.\n"
+                    f"Command: {' '.join(base_cmd)}\n\n"
+                    f"--- Full output ---\n{''.join(output_lines)}"
+                )
         else:
             logger.info("Model Server: Running on parallel thread")
-            process = subprocess.Popen(base_cmd)
+            process = subprocess.Popen(base_cmd, stderr=subprocess.PIPE)
 
             if server_finished_event:
                 def monitor_process():
-                    process.wait()
+                    _, stderr_output = process.communicate()
+                    if process.returncode != 0 and stderr_output:
+                        logger.error(
+                            "Model Server: exited with code %d.\n%s",
+                            process.returncode,
+                            stderr_output.decode(errors="replace"),
+                        )
                     logger.info("Model Server: process exited.")
                     logger.info("Model Server: Set server_finished_event.")
                     server_finished_event.set()
@@ -284,3 +321,27 @@ class LLMModel():
                     process.wait()
 
         logger.info("Model Server: stopped.")
+
+    @staticmethod
+    def _to_wsl_path(windows_path: str) -> str:
+        p = Path(windows_path).resolve()
+        drive = p.drive.lower().rstrip(":")
+        rest = p.as_posix()[3:]  # strip "C:/"
+        return f"/mnt/{drive}/{rest}"
+
+    def _wrap_wsl(self, cmd: list) -> list:
+        # Remap any Windows path arguments to their /mnt/... WSL equivalents
+        wsl_args = []
+        for arg in cmd:
+            try:
+                p = Path(arg)
+                if p.is_absolute() or (p.drive and ":" in p.drive):
+                    wsl_args.append(self._to_wsl_path(arg))
+                    continue
+            except (ValueError, OSError):
+                pass
+            wsl_args.append(arg)
+
+        project_root = self._to_wsl_path(str(Path(__file__).resolve().parents[3]))
+        inner = " ".join(f'"{a}"' if " " in a else a for a in wsl_args)
+        return ["wsl", "bash", "-lc", f"cd {project_root} && poetry run {inner}"]

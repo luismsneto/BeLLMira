@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from typing import List, Dict, Optional, Tuple
 
@@ -69,6 +70,7 @@ class ModelSummarizationEvaluator(ModelEvaluatorInterface):
             model_name=self.model_name,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            enable_thinking=False
         )
         start = time.time()
         response = self.model_client.send_request(req)

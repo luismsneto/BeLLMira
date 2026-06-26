@@ -85,6 +85,11 @@ class ModelParallelLoadEvaluator(ModelEvaluatorInterface):
             completion_tokens = response.json().get("usage", {}).get("completion_tokens") if response.status_code == 200 else None
             with lock:
                 latencies.append(latency)
+                if response.status_code != 200:
+                    try:
+                        logger.warning("HTTP %d from server: %s", response.status_code, response.json())
+                    except Exception:
+                        logger.warning("HTTP %d from server: %s", response.status_code, response.text)
                 if completion_tokens:
                     completion_tokens_list.append(completion_tokens)
                 if prompt_tokens:
@@ -121,18 +126,27 @@ class ModelParallelLoadEvaluator(ModelEvaluatorInterface):
 
     def evaluate(self, max_prompts: int = 1) -> Dict[str, Dict[str, Dict]]:
         results_dict = {}
+        failed_context_len = None
         self.warm_up_model()
         for ref_key, context in self.prompt_context.items():
+            if failed_context_len is not None and len(context) >= failed_context_len:
+                logger.warning("Skipping %s — context is >= length that caused a previous error.", ref_key)
+                continue
+
             for concurrency in self.concurrency_levels:
                 key = f"{concurrency}_par_req"
                 logger.info("Running %s with %s context...", key, ref_key)
                 stats = self._run_concurrent_requests(context, concurrency)
                 error_codes = [code for code, count in stats["Status_codes"].items() if code >= 400 and count > 0]
                 if error_codes:
-                    logger.warning("Error %s detected for %s with %s context. Skipping...", error_codes, key, ref_key)
-                    return results_dict
+                    logger.warning("Error %s detected for %s with %s context. Storing error and skipping larger contexts.", error_codes, key, ref_key)
+                    if key not in results_dict:
+                        results_dict[key] = {}
+                    results_dict[key][ref_key] = {**stats, "error": True}
+                    failed_context_len = len(context)
+                    break
                 avg_tokens = stats["Avg_prompt_tokens"]
-                label = f"{avg_tokens // 1000}k_tokens"
+                label = f"{avg_tokens // 1000}k_tokens" if avg_tokens else ref_key
                 if key not in results_dict:
                     results_dict[key] = {}
                 results_dict[key][label] = stats
