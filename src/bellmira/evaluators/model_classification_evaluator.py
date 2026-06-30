@@ -1,0 +1,251 @@
+import logging
+import time
+import requests
+from pathlib import Path
+from typing import List, Dict, Optional
+import json
+from collections import Counter
+import pandas as pd
+
+from bellmira.evaluators.evaluator_interface import ModelEvaluatorInterface
+from bellmira.llm_model.llm_model_client import ModelClient
+
+logger = logging.getLogger(__name__)
+
+class ModelClassificationEvaluator(ModelEvaluatorInterface):
+    def __init__(
+        self,
+        input_col: str,
+        output_col: str,
+        url: str,
+        data_path: str,
+        data_format: str = "parquet",
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        json_schema: Optional[dict] = None,
+        dbutils=None,
+        spark=None,
+    ):
+        """
+        Args:
+            input_col:    Column name containing the model input text.
+            output_col:   Column name containing the ground-truth label.
+            url:          Model server base URL.
+            data_path:    Path prefixed with a scheme: ``file:``, ``dbfs:``, or ``adls:``.
+            data_format:  File format — ``"parquet"``, ``"csv"``, or ``"json"``.
+            temperature:  Sampling temperature.
+            system_prompt: Optional system prompt.
+            json_schema:  Optional guided-JSON schema.
+            dbutils:      Databricks ``dbutils`` object. Required for ``adls:`` paths.
+                          Pass explicitly; ``globals()`` lookup has been removed.
+            spark:        Databricks ``SparkSession``. Required for ``adls:`` and ``dbfs:`` paths.
+                          Pass explicitly; ``globals()`` lookup has been removed.
+        """
+        prefix, path = data_path.split(":", 1)
+        path = path.lstrip("/").strip()
+        self._use_spark = False
+
+        match prefix:
+            case "s3":
+                raise NotImplementedError("S3 path handling is not yet implemented")
+            case "dbfs":
+                logger.info("Handling DBFS path")
+                self._use_spark = True
+            case "file":
+                logger.info("Handling local file path")
+            case "adls":
+                logger.info("Handling ADLS path")
+                if dbutils is None or spark is None:
+                    raise RuntimeError(
+                        "'dbutils' and 'spark' constructor parameters are required for ADLS paths. "
+                        "Pass them explicitly; this feature is only supported in a Databricks environment."
+                    )
+                try:
+                    client_id = dbutils.secrets.get(scope="DataBricksKVScopeAIP", key="DTBK002-SPNClientID-AI")
+                    client_secret = dbutils.secrets.get(scope="DataBricksKVScopeAIP", key="DTBK002-SPNClientSecret-AI")
+                    tenant_id_endpoint = dbutils.secrets.get(scope="DataBricksKVScopeAIP", key="DataBricksAccessToken")
+                    datalake_url = dbutils.secrets.get(scope="DataBricksKVScopeAIP", key="DataLakeSAUri")
+
+                    spark.conf.set("fs.azure.account.auth.type", "OAuth")
+                    spark.conf.set("fs.azure.account.oauth.provider.type", "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider")
+                    spark.conf.set("fs.azure.account.oauth2.client.id", client_id)
+                    spark.conf.set("fs.azure.account.oauth2.client.secret", client_secret)
+                    spark.conf.set("fs.azure.account.oauth2.client.endpoint", tenant_id_endpoint)
+
+                    logger.info("ADLS access configured successfully.")
+                    data_path = datalake_url + path
+                except Exception as e:
+                    logger.error("Error configuring ADLS access: %s", e, exc_info=True)
+                    logger.error("Please ensure Databricks secrets scope 'DataBricksKVScopeAIP' and the required keys exist.")
+                    raise
+                self._use_spark = True
+            case _:
+                raise ValueError(f"Unknown data path prefix: '{prefix}'")
+
+        if self._use_spark:
+            if spark is None:
+                raise RuntimeError(
+                    "'spark' constructor parameter is required for this data path prefix. "
+                    "Pass it explicitly; this feature is only supported in a Databricks environment."
+                )
+            try:
+                data_df = spark.read.format(data_format).load(data_path)
+                data_df.createOrReplaceTempView("categories_raw")
+            except Exception as e:
+                logger.error("Error loading data from %s: %s", data_path, e, exc_info=True)
+                raise
+            self.data = data_df
+        else:
+            read_fns = {"parquet": pd.read_parquet, "csv": pd.read_csv, "json": pd.read_json}
+            if data_format not in read_fns:
+                raise ValueError(f"Unsupported data format for local files: '{data_format}'")
+            self.data = read_fns[data_format](path)
+
+        self.model_url = url
+        self.system_prompt = system_prompt
+        self.temperature = temperature
+        self.json_schema = json_schema
+        self.model_client = ModelClient(base_url=self.model_url)
+        self.model_name = self.model_client.get_model_name()
+
+        self.input_col = input_col
+        self.output_col = output_col
+
+    def evaluate(self, max_prompts: int = 2) -> Dict[str, List[Dict]]:
+        logger.info("ClassificationEvaluator warming up model...")
+        self.warm_up_model(warmup_count=3)
+        logger.info("ClassificationEvaluator warm up model finished.")
+        results_dict = {}
+
+        batch = self.data.limit(max_prompts).toPandas() if self._use_spark else self.data.head(max_prompts)
+
+        if self.input_col not in batch or self.output_col not in batch:
+            raise ValueError(f"Batch is missing required columns: {self.input_col} or {self.output_col}")
+
+        results_list = []
+        for user_input, assistant_output in zip(batch[self.input_col], batch[self.output_col]):
+            start_time = time.time()
+            req = self.model_client.build_chat_request(
+                user_prompt=user_input,
+                system_prompt=self.system_prompt,
+                model_name=self.model_name,
+                enable_thinking=False
+            )
+            result = self.model_client.send_request(req)
+            end_time = time.time()
+            if not result.ok:
+                error_stats = {
+                    "Code": result.status_code,
+                    "Message": result.reason
+                }
+                results_list.append(error_stats)
+                return results_dict
+            try:
+                result_json = result.json()
+                usage = result_json.get("usage", {})
+            except ValueError:
+                usage = {}
+            request_stats = {
+                "Code": result.status_code,
+                "Execution_time": end_time - start_time,
+                "Total_tokens": usage.get('total_tokens'),
+                "Prompt_tokens": usage.get('prompt_tokens'),
+                "Completion_tokens": usage.get('completion_tokens'),
+                "Prediction": result_json.get("choices", {})[0].get("message", {}).get("content"),
+                "Label":assistant_output
+            }
+            logger.debug("Request stats: %s", request_stats)
+            results_list.append(request_stats)
+        return results_list
+        
+    def extract_threshold_metrics(self, results: List[Dict]) -> Dict[str, Dict]:
+
+        n = len(results)
+        if n == 0: 
+            return {}
+        errors = []
+        avg_execution_time = sum(r["Execution_time"] for r in results) / n
+        avg_prompt_tokens = sum(r["Prompt_tokens"] for r in results) / n
+        avg_completion_tokens = sum(r["Completion_tokens"] for r in results) / n
+        for r in results:
+            if r["Code"] != 200:
+                errors.append(r["Message"])
+        labels = set(r["Label"] for r in results)
+        preds = set(r["Prediction"] for r in results)
+        classes = sorted(labels | preds)
+
+        # Initialize counts
+        TP = Counter()
+        FP = Counter()
+        FN = Counter()
+        TN = Counter()
+        
+        # Count TP, FP, FN per class
+        for cls in classes:
+            for r in results:
+                pred = r["Prediction"]
+                label = r["Label"]
+
+                if pred == cls and label == cls:
+                    TP[cls] += 1
+                elif pred == cls and label != cls:
+                    FP[cls] += 1
+                elif pred != cls and label == cls:
+                    FN[cls] += 1
+                elif pred != cls and label != cls:
+                    TN[cls] += 1
+
+        # Compute per-class metrics
+        metrics = {}
+        for cls in classes:
+            tp, fp, fn, tn = TP[cls], FP[cls], FN[cls], TN[cls]
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+            metrics[cls] = {
+                "TP": tp,
+                "FP": fp,
+                "FN": fn,
+                "TN": tn,
+                "Precision": precision,
+                "Recall": recall,
+                "F1": f1
+            }
+
+        # Macro average
+        macro_precision = round(sum(m["Precision"] for m in metrics.values()) / len(classes), 2)
+        macro_recall = round(sum(m["Recall"] for m in metrics.values()) / len(classes), 2)
+        macro_f1 = round(sum(m["F1"] for m in metrics.values()) / len(classes), 2)
+
+        # Micro average
+        total_TP = sum(TP.values())
+        total_FP = sum(FP.values())
+        total_FN = sum(FN.values())
+
+        micro_precision = round(total_TP / (total_TP + total_FP), 2) if (total_TP + total_FP) > 0 else 0.0
+        micro_recall = round(total_TP / (total_TP + total_FN), 2) if (total_TP + total_FN) > 0 else 0.0
+        micro_f1 = round((2 * micro_precision * micro_recall) / (micro_precision + micro_recall), 2) if (micro_precision + micro_recall) > 0 else 0.0
+
+        # Accuracy
+        correct = sum(1 for r in results if r["Prediction"] == r["Label"])
+        accuracy = round(correct / len(results), 2) if results else 0.0
+
+        # Confusion matrix
+        conf_mat = pd.DataFrame(0, index=classes, columns=classes)
+        for r in results:
+            conf_mat.loc[r["Label"], r["Prediction"]] += 1
+
+        return {
+            "Avg_Execution_Time": round(avg_execution_time, 1),
+            "Avg_Prompt_Tokens": round(avg_prompt_tokens, 1),
+            "Avg_Completion_Tokens": round(avg_completion_tokens, 1),
+            #"Per_Class": metrics,
+            "Macro-Precision": macro_precision,
+            "Macro-Recall": macro_recall,
+            "Macro-F1": macro_f1,
+            "Micro-Precision": micro_precision,
+            "Micro-Recall": micro_recall,
+            "Micro-F1": micro_f1,
+            "Accuracy": accuracy,
+            "Error": "\n".join(errors)
+        }

@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "bellmira"
+version = "1.0.5"
+description = ""
+authors = ["Luis Neto"]
+readme = "README.md"
+packages = [{ include = "bellmira", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "~3.12"
+vllm = {url = "https://github.com/vllm-project/vllm/releases/download/v0.23.0/vllm-0.23.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl", markers = "sys_platform == 'linux'"}
+numpy = ">=2.0.0"
+transformers = ">=5.5.1"
+mlflow = "3.3.2"
+uvloop = {version = "0.22.1", markers = "sys_platform == 'linux'"}
+pydantic-extra-types = ">=2.10.5,!=2.11.2"
+torch = {version = ">=2.7.0", source = "pytorch-cu128"}
+torchvision = {version = ">=0.22.0", source = "pytorch-cu128"}
+torchaudio = {version = ">=2.7.0", source = "pytorch-cu128"}
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.30.1"
+jupyter-server = "^2.17.0"
+
+[[tool.poetry.source]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+priority = "explicit"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

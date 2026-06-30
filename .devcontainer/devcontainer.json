@@ -1,0 +1,22 @@
+{
+  "name": "DevContainer",
+  "build": {
+    "context": "../",
+    "dockerfile": "Dockerfile"
+  },
+  "settings": {
+    "terminal.integrated.defaultProfile.linux": "bash",
+    "python.defaultInterpreterPath": "/opt/venv/bin/python"
+  },
+  "extensions": [
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "esbenp.prettier-vscode"
+  ],
+  "remoteUser": "root",
+  "runArgs": ["--gpus", "all"],
+  "hostRequirements": {
+    "gpu": true
+  },
+  "forwardPorts": [8080, 11434]
+}

@@ -1,0 +1,9 @@
+Model,Max Model Len,Quantization,Precision,Dtype,Size,Prefix Caching,Env,VLLM Version,Status,Datetime,1k Tok Avg Time,Error,2k Tok Avg Time,4k Tok Avg Time
+Qwen3-14 IN,,,,,,False,IN,0.9.2,error-exception,2026-03-28 20:50:33,,,,
+Qwen2.5 VL IN,,,,,,False,IN,0.9.2,timeout,2026-03-28 20:58:23,,,,
+Model,Max Model Len,Quantization,Precision,Dtype,Size,Prefix Caching,Env,VLLM Version,Status,Datetime,1k Tok Avg Time,Error,,
+Qwen3-14 IN,,,,,,False,IN,0.9.2,success,2026-03-28 21:11:08,"{'Avg_Exec_Time': 85, 'Avg_prompt_tokens': 1322, 'Avg_completion_tokens': 830}",,,
+Qwen2.5 VL IN,,,,,,False,IN,0.9.2,timeout,2026-03-28 21:17:33,,,,
+Qwen3-14 IN,,,,,,False,IN,0.9.2,success,2026-03-28 21:28:18,"{'Avg_Exec_Time': 86, 'Avg_prompt_tokens': 1322, 'Avg_completion_tokens': 830}",,,
+Qwen2.5 VL IN,,,,,,False,IN,0.9.2,timeout,2026-03-28 21:34:43,,,,
+Local Model,,,,,,False,Local,0.23.0,success,2026-06-25 16:19:16,"{'Avg_Exec_Time': 23.61, 'Avg_prompt_tokens': 1324.5, 'Avg_completion_tokens': 976.5}",,"{'Avg_Exec_Time': 24.1, 'Avg_prompt_tokens': 2615.5, 'Avg_completion_tokens': 1000.0}","{'Avg_Exec_Time': 26.05, 'Avg_prompt_tokens': 5422.5, 'Avg_completion_tokens': 1000.0}"

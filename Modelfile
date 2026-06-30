@@ -1,0 +1,9 @@
+FROM /workspaces/BeLLMira/.tmp/Qwen3.5-9B.Q4_K_M.gguf
+TEMPLATE """<|im_start|>system
+{{ .System }}<|im_end|>
+<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+"""
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
